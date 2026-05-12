@@ -734,6 +734,40 @@ Hermes has terminal access. Security matters.
 
 If your PR affects security, note it explicitly in the description.
 
+### Dependency pinning policy (supply chain hardening)
+
+After the [litellm supply chain compromise](https://github.com/BerriAI/litellm/issues/24512) in March 2026 and the [Mini Shai-Hulud worm campaign](https://socket.dev/blog/tanstack-npm-packages-compromised-mini-shai-hulud-supply-chain-attack) in May 2026, all dependencies must follow these rules:
+
+| Source type | Required treatment | Rationale |
+|---|---|---|
+| **PyPI package** | `>=floor,<next_major` | PyPI versions are immutable once published, but new versions can be pushed into your range. A `<next_major` ceiling stops a 1.x install from upgrading to a malicious 2.0.0. |
+| **Git URL** (atroposlib, tinker, yc-bench, Baileys) | Full commit SHA | Branches and tags are mutable refs; SHA is content-addressed. |
+| **GitHub Actions** | Full commit SHA + version comment | Action tags are mutable refs (e.g. tj-actions/changed-files March 2025). Pin as `uses: owner/action@<sha>  # vX.Y.Z` |
+| **CI-only pip installs** | `==exact` | Hermetic CI builds; churn is acceptable. |
+
+**Every new PyPI dependency in a PR must have a `<next_major` upper bound.** PRs adding unbounded `>=X.Y.Z` specs will be rejected by reviewers. The `supply-chain-audit.yml` CI workflow also flags dependency manifest changes for manual review.
+
+**How to determine the ceiling:**
+- If the package is at version `1.x.y`, use `<2`.
+- If the package is at version `0.x.y` (pre-1.0), use `<1` (or `<0.next_minor` for particularly volatile APIs).
+- For micro-version packages (e.g. `0.20.x`), `<1` is still appropriate.
+
+**Examples:**
+```toml
+# ✅ Correct
+"httpx>=0.28.1,<1"
+"openai>=2.21.0,<3"
+"pydantic>=2.12.5,<3"
+
+# ❌ Rejected — no upper bound
+"some-package>=1.2.3"
+
+# ❌ Rejected — too tight (blocks legitimate patches)
+"some-package==1.2.3"
+```
+
+**Reference PRs:** #2796 (litellm removal), #2810 (upper bounds pass), #9801 (SHA pinning + supply-chain-audit CI).
+
 ---
 
 ## Pull Request Process
