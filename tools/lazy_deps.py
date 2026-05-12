@@ -76,43 +76,46 @@ logger = logging.getLogger(__name__)
 
 LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # TTS providers
-    "tts.mistral": ("mistralai>=2.3.0,<3",),
-    "tts.elevenlabs": ("elevenlabs>=1.0,<2",),
+    # Pinned to exact versions to match pyproject.toml's no-ranges policy
+    # (see comment at top of [project.dependencies]). When bumping, update
+    # both this map AND the corresponding extra in pyproject.toml.
+    "tts.mistral": ("mistralai==2.3.0",),
+    "tts.elevenlabs": ("elevenlabs==1.59.0",),
     # Speech-to-text providers (faster-whisper local STT bundle)
     "stt.faster_whisper": (
-        "faster-whisper>=1.0.0,<2",
-        "sounddevice>=0.4.6,<1",
-        "numpy>=1.24.0,<3",
+        "faster-whisper==1.2.1",
+        "sounddevice==0.5.5",
+        "numpy==2.4.3",
     ),
-    "stt.mistral": ("mistralai>=2.3.0,<3",),
+    "stt.mistral": ("mistralai==2.3.0",),
     # Memory providers
-    "memory.honcho": ("honcho-ai>=2.0.1,<3",),
+    "memory.honcho": ("honcho-ai==2.0.1",),
     # AWS Bedrock provider
-    "provider.bedrock": ("boto3>=1.35.0,<2",),
+    "provider.bedrock": ("boto3==1.42.89",),
     # Messaging platforms (lazy-installable on demand)
     "platform.slack": (
-        "slack-bolt>=1.18.0,<2",
-        "slack-sdk>=3.27.0,<4",
+        "slack-bolt==1.27.0",
+        "slack-sdk==3.40.1",
     ),
     "platform.dingtalk": (
-        "dingtalk-stream>=0.20,<1",
-        "alibabacloud-dingtalk>=2.0.0",
-        "qrcode>=7.0,<8",
+        "dingtalk-stream==0.24.3",
+        "alibabacloud-dingtalk==2.2.42",
+        "qrcode==7.4.2",
     ),
     "platform.feishu": (
-        "lark-oapi>=1.5.3,<2",
-        "qrcode>=7.0,<8",
+        "lark-oapi==1.5.3",
+        "qrcode==7.4.2",
     ),
     # Google Workspace skills
     "skill.google_workspace": (
-        "google-api-python-client>=2.100,<3",
-        "google-auth-oauthlib>=1.0,<2",
-        "google-auth-httplib2>=0.2,<1",
+        "google-api-python-client==2.194.0",
+        "google-auth-oauthlib==1.3.1",
+        "google-auth-httplib2==0.3.1",
     ),
     # YouTube transcripts skill
-    "skill.youtube": ("youtube-transcript-api>=1.2.0",),
+    "skill.youtube": ("youtube-transcript-api==1.2.4",),
     # ACP adapter (VS Code / Zed / JetBrains integration)
-    "tool.acp": ("agent-client-protocol>=0.9.0,<1.0",),
+    "tool.acp": ("agent-client-protocol==0.9.0",),
 }
 
 
