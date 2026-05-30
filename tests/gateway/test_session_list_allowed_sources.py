@@ -42,13 +42,13 @@ def _call(limit: int | None = None):
 def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
     """acp / webhook / custom sources should all appear; only ``tool`` is hidden."""
     rows = [
-        {"id": "tui-1", "source": "tui", "started_at": 9},
-        {"id": "tool-1", "source": "tool", "started_at": 8},
-        {"id": "tg-1", "source": "telegram", "started_at": 7},
-        {"id": "acp-1", "source": "acp", "started_at": 6},
-        {"id": "cli-1", "source": "cli", "started_at": 5},
-        {"id": "webhook-1", "source": "webhook", "started_at": 4},
-        {"id": "custom-1", "source": "my-custom-source", "started_at": 3},
+        {"id": "tui-1", "source": "tui", "started_at": 9, "message_count": 1},
+        {"id": "tool-1", "source": "tool", "started_at": 8, "message_count": 1},
+        {"id": "tg-1", "source": "telegram", "started_at": 7, "message_count": 1},
+        {"id": "acp-1", "source": "acp", "started_at": 6, "message_count": 1},
+        {"id": "cli-1", "source": "cli", "started_at": 5, "message_count": 1},
+        {"id": "webhook-1", "source": "webhook", "started_at": 4, "message_count": 1},
+        {"id": "custom-1", "source": "my-custom-source", "started_at": 3, "message_count": 1},
     ]
     db = _StubDB(rows)
     monkeypatch.setattr(server, "_get_db", lambda: db)
@@ -90,11 +90,11 @@ def test_session_list_respects_explicit_limit(monkeypatch):
 
 def test_session_list_preserves_ordering_after_filter(monkeypatch):
     rows = [
-        {"id": "newest", "source": "telegram", "started_at": 5},
-        {"id": "internal", "source": "tool", "started_at": 4},
-        {"id": "middle", "source": "tui", "started_at": 3},
-        {"id": "also-visible", "source": "webhook", "started_at": 2},
-        {"id": "oldest", "source": "discord", "started_at": 1},
+        {"id": "newest", "source": "telegram", "started_at": 5, "message_count": 1},
+        {"id": "internal", "source": "tool", "started_at": 4, "message_count": 1},
+        {"id": "middle", "source": "tui", "started_at": 3, "message_count": 1},
+        {"id": "also-visible", "source": "webhook", "started_at": 2, "message_count": 1},
+        {"id": "oldest", "source": "discord", "started_at": 1, "message_count": 1},
     ]
     monkeypatch.setattr(server, "_get_db", lambda: _StubDB(rows))
 
