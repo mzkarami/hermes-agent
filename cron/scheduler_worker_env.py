@@ -16,8 +16,28 @@ site-packages, dropped venv markers) stand.
 from __future__ import annotations
 
 import os
+import sys
 import sysconfig
 from pathlib import Path
+
+
+def cron_worker_python(repo_root: Path) -> str:
+    """Use this profile's committed dependency interpreter for an external worker.
+
+    The PM launcher may run the gateway on a bare bundled Python and add the
+    selected venv's site-packages in-process. ``sys.executable`` then lacks
+    Hermes dependencies when the cron worker starts in a new interpreter.
+    Legacy installs without a committed PM environment keep their interpreter.
+    """
+    from pm.environments import committed_venv, venv_python
+
+    environment = committed_venv(repo_root)
+    if environment is None:
+        return sys.executable
+    python = venv_python(environment)
+    if not python.is_file():
+        raise RuntimeError(f"cron worker dependency interpreter is missing: {python}")
+    return str(python)
 
 
 def _installed_purelib() -> Path | None:

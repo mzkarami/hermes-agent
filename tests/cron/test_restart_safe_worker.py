@@ -583,6 +583,29 @@ def test_launch_external_worker_degrades_by_default_with_real_helper(
     assert not (tmp_path / "cron/external-workers/exec-1.json").exists()
 
 
+def test_external_worker_dispatch_uses_selected_dependency_interpreter(tmp_path, monkeypatch):
+    import cron.scheduler as scheduler
+    from tools.process_registry import GatewayChildDispatch
+
+    selected_python = str(tmp_path / "selected-venv/bin/python")
+    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(scheduler, "load_config_readonly", lambda: {})
+    monkeypatch.setattr(
+        "cron.scheduler_worker_env.cron_worker_python", lambda _root: selected_python,
+    )
+    monkeypatch.setattr(
+        "tools.process_registry.restart_safe_gateway_child_argv",
+        lambda command, **_: GatewayChildDispatch("degraded", command),
+    )
+    spawned, _payloads, _handoff, _get = _stub_external_worker_launch(scheduler, monkeypatch)
+
+    assert scheduler._launch_external_cron_worker(
+        {"id": "job-1", "execution_id": "exec-1", "prompt": "work"}
+    ) is True
+    assert spawned[0][0][0] == selected_python
+    assert spawned[0][0][1:3] == ["-m", "cron.scheduler"]
+
+
 def test_launch_external_worker_pins_the_gateways_tree_on_pythonpath(
     tmp_path, monkeypatch,
 ):
