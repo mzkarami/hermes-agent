@@ -16,6 +16,13 @@ from unittest.mock import Mock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolate_committed_worker_environment(monkeypatch):
+    # The gateway's dependency environment is resolved through HERMES_HOME.
+    # Unit tests must not probe a developer's real PM manifest under ~/.hermes.
+    monkeypatch.setattr("pm.environments.committed_venv", lambda _root: None)
+
+
 @pytest.fixture
 def execution_ledger(tmp_path, monkeypatch):
     import cron.executions as executions
@@ -172,9 +179,37 @@ def test_external_worker_adopts_execution_and_runs_payload_once(
     assert observed_homes == [expected_home, expected_home]
     assert ack.exists()
     assert not payload.exists()
-    # Post-ack the worker owns the stderr capture: a gateway that restarted mid-run
-    # would otherwise leave one orphan per surviving run.
-    assert not stderr_capture.exists()
+    # The waiter cleans this after the worker exits, keeping crash details visible.
+    assert stderr_capture.exists()
+
+
+def test_external_worker_logs_post_ack_crash(tmp_path, monkeypatch, caplog):
+    import cron.scheduler as scheduler
+
+    payload = tmp_path / "payload.json"
+    ack = tmp_path / "exec-1.ready"
+    stderr_capture = tmp_path / "exec-1.stderr"
+    stderr_capture.write_text("", encoding="utf-8")
+    payload.write_text(
+        json.dumps({
+            "job": {"id": "job-1", "execution_id": "exec-1"},
+            "profile_home": str(tmp_path / "profile"),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "cron.executions.adopt_claimed_execution",
+        lambda _execution_id: {"id": "exec-1", "status": "running"},
+    )
+    monkeypatch.setattr(
+        scheduler, "run_one_job", Mock(side_effect=RuntimeError("test post-ack crash")),
+    )
+
+    with pytest.raises(RuntimeError, match="test post-ack crash"):
+        scheduler._run_external_worker_payload(payload, ack)
+    assert ack.exists()
+    assert stderr_capture.exists()
+    assert "crashed after ownership acknowledgement" in caplog.text
 
 
 def test_external_worker_ack_is_never_observable_half_written(tmp_path, monkeypatch):
@@ -278,7 +313,7 @@ def _stub_external_worker_launch(scheduler, monkeypatch):
             {"id": "exec-1", "status": "completed"},
         ]
     )
-    get = Mock(side_effect=lambda _execution_id: next(observed_statuses))
+    get = Mock(side_effect=lambda _execution_id: next(observed_statuses, {"status": "completed"}))
     monkeypatch.setattr(scheduler, "get_execution", get)
     return spawned, payloads, handoff, get
 
@@ -354,12 +389,18 @@ def test_launch_external_worker_uses_restart_safe_scope_and_acknowledges(
         clear_env_passthrough()
         set_multiplex_active(False)
     assert wrapped_commands[0][1] == "cron-job-1-exec-exec-1"
+    # The worker must enter via bootstrap, not a venv binary that run_agent
+    # subsequently re-execs under bare store Python without dependencies.
+    worker_command = wrapped_commands[0][0]
+    assert worker_command[1:3] == ["-I", "-c"]
+    assert "import hermes_bootstrap" in worker_command[3]
+    assert "runpy.run_module('cron.scheduler'" in worker_command[3]
     assert spawned[0][0][0:2] == ["scope", "--"]
     assert spawned[0][1]["start_new_session"] is True
     assert "ANTHROPIC_API_KEY" not in spawned[0][1]["env"]
     assert spawned[0][1]["env"]["SERVICE_TOKEN"] == "target-profile-token"
     handoff.assert_called_once_with("exec-1")
-    assert get.call_count == 2
+    assert get.call_count == 3
     assert payloads[0]["multiplex_active"] is True
     # Once the attempt is terminal the parent reaps its own handoff artifacts.
     assert not (tmp_path / "cron/external-workers/exec-1.json").exists()
@@ -463,7 +504,7 @@ def test_external_worker_exit_rechecks_exact_execution_before_failure(monkeypatc
             {"id": "exec-1", "status": "completed"},
         ]
     )
-    get = Mock(side_effect=lambda _execution_id: next(statuses))
+    get = Mock(side_effect=lambda _execution_id: next(statuses, {"status": "completed"}))
     monkeypatch.setattr(scheduler, "get_execution", get, raising=False)
     process = Mock()
     process.poll.return_value = 0
@@ -472,7 +513,7 @@ def test_external_worker_exit_rechecks_exact_execution_before_failure(monkeypatc
     assert scheduler._wait_for_external_cron_worker(
         process, execution_id="exec-1"
     ) is True
-    assert get.call_count == 2
+    assert get.call_count == 3
 
 
 def test_external_worker_crash_recovers_uncertain_attempt(monkeypatch):
@@ -484,7 +525,7 @@ def test_external_worker_crash_recovers_uncertain_attempt(monkeypatch):
             {"id": "exec-1", "status": "unknown"},
         ]
     )
-    get = Mock(side_effect=lambda _execution_id: next(statuses))
+    get = Mock(side_effect=lambda _execution_id: next(statuses, {"status": "completed"}))
     recover = Mock(return_value=1)
     monkeypatch.setattr(scheduler, "get_execution", get)
     monkeypatch.setattr(
@@ -498,7 +539,7 @@ def test_external_worker_crash_recovers_uncertain_attempt(monkeypatch):
         process, execution_id="exec-1"
     ) is True
     recover.assert_called_once_with()
-    assert get.call_count == 2
+    assert get.call_count == 3
 
 
 

@@ -3442,6 +3442,21 @@ def _wait_for_external_cron_worker(
     except Exception as wait_error:
         raise _ExternalWorkerPostHandoffError(str(wait_error)) from wait_error
     finally:
+        # Only a terminal unknown represents a worker that died without recording
+        # the outcome. Read its private stderr capture before removing it; after
+        # an acknowledgement the worker used to unlink this before Python could
+        # print an unhandled traceback, making the cause impossible to diagnose.
+        try:
+            current = get_execution(execution_id)
+            if current and current.get("status") == "unknown":
+                from cron.scheduler_diagnostics import external_worker_stderr_tail
+
+                stderr = next((p for p in handoff_files if p.suffix == ".stderr"), None)
+                if stderr is not None:
+                    logger.error("Cron worker %s ended unknown; stderr: %s",
+                                 execution_id, external_worker_stderr_tail(stderr))
+        except Exception:
+            logger.exception("Could not inspect failed cron worker %s", execution_id)
         if job_id is not None:
             with _running_lock:
                 _restart_safe_waiter_job_ids.discard(_inflight_key(job_id))
@@ -3470,15 +3485,17 @@ def _launch_external_cron_worker(job: dict) -> bool:
     ack_path = handoff_dir / f"{execution_id}.ready"
     # Captured so a worker that dies before its acknowledgement can name the cause (#112729).
     stderr_path = handoff_dir / f"{execution_id}.stderr"
-    command = [
-        sys.executable,
-        "-m",
-        "cron.scheduler",
-        "--external-worker-file",
-        str(payload_path),
-        "--ack-file",
-        str(ack_path),
-    ]
+    from hermes_cli._launchers import runtime_command
+    repo_root = Path(__file__).resolve().parent.parent
+    # The worker imports run_agent after acknowledging ownership. That module
+    # imports hermes_bootstrap, which re-execs a venv interpreter under bare
+    # store Python. Enter through the canonical bootstrap from the start so
+    # the selected company's dependency generation is active in that process.
+    command = runtime_command(
+        repo_root,
+        ("--external-worker-file", str(payload_path), "--ack-file", str(ack_path)),
+        module="cron.scheduler",
+    )
 
     from agent.secret_scope import (
         build_profile_secret_scope,
@@ -3561,7 +3578,6 @@ def _launch_external_cron_worker(job: dict) -> bool:
     # `-m cron.scheduler` has no hermes_cli.main bootstrap; pin this checkout explicitly
     # (PYTHONSAFEPATH / stale editable mapping, #112729). See cron/scheduler_worker_env.py.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
-    repo_root = Path(__file__).resolve().parent.parent
     worker_env = pin_hermes_tree_on_pythonpath(worker_env, repo_root)
     try:
         stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -3759,17 +3775,22 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
             old_external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER")
             os.environ["_HERMES_CRON_EXTERNAL_WORKER"] = execution_id
             try:
-                return run_one_job(job, adapters=None, loop=None, verbose=False)
+                try:
+                    return run_one_job(job, adapters=None, loop=None, verbose=False)
+                except BaseException:
+                    # Once the ack is published the gateway no longer reads stderr.
+                    # An unhandled exception otherwise disappears when the capture
+                    # is unlinked below, leaving only an unexplained unknown row.
+                    logger.exception(
+                        "Cron external worker %s crashed after ownership acknowledgement",
+                        execution_id,
+                    )
+                    raise
             finally:
                 if old_external_execution is None:
                     os.environ.pop("_HERMES_CRON_EXTERNAL_WORKER", None)
                 else:
                     os.environ["_HERMES_CRON_EXTERNAL_WORKER"] = old_external_execution
-                # Post-ack the gateway never reads the stderr capture (it only
-                # serves the pre-ack death report) and may not outlive this run
-                # in the restart-safe topology, so the worker removes its own.
-                with contextlib.suppress(OSError):
-                    ack_path.with_suffix(".stderr").unlink(missing_ok=True)
     finally:
         if secret_token is not None:
             reset_secret_scope(secret_token)
