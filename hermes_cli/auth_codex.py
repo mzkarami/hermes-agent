@@ -828,24 +828,29 @@ def _refresh_expired_codex_probe_token(
 def _probe_codex_pool_entry_quota_restored(entry: dict[str, Any]) -> Optional[bool]:
     """``_probe_codex_quota_restored`` for a persisted pool entry, refreshing an expired token first."""
     from hermes_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store
-    token = _stripped(entry.get("access_token"))
-    fresh = _refresh_expired_codex_probe_token(token, entry.get("refresh_token"))
-    if fresh:
-        token = fresh["access_token"]
-        try:
-            with _auth_store_lock():
-                auth_store = _load_auth_store()
-                for disk_entry in _codex_pool_dicts(_pool_entries(auth_store, "openai-codex")):
-                    if disk_entry.get("id") == entry.get("id"):
-                        disk_entry.update(fresh)
-                        _save_auth_store(auth_store)
-                        break
-        except Exception:
-            logger.debug("Failed to persist refreshed Codex pool tokens", exc_info=True)
+    from agent.credential_pool import _borrowed_single_use_pool_root, _profile_owns_pool_provider
+    # A quota probe can rotate a single-use token too. Re-read and commit
+    # under the owner's lock, exactly like the normal pool refresh path.
+    with _auth_store_lock():
+        target = (None if _profile_owns_pool_provider("openai-codex")
+                  else _borrowed_single_use_pool_root("openai-codex"))
+        with _auth_store_lock(target_path=target):
+            auth_store = _load_auth_store(target)
+            current = next((row for row in _codex_pool_dicts(_pool_entries(auth_store, "openai-codex"))
+                            if row.get("id") == entry.get("id")), None)
+            if current is None:
+                return None
+            token = _stripped(current.get("access_token"))
+            fresh = _refresh_expired_codex_probe_token(token, current.get("refresh_token"))
+            if fresh:
+                current.update(fresh)
+                # Do not advertise an uncommitted rotated grant.
+                _save_auth_store(auth_store, target_path=target)
+                token = fresh["access_token"]
+            base_url = _codex_pool_route_base_url(current.get("base_url"))
     if not token:
         return None
-    # The row keeps the canonical URL; a gateway key belongs to its route host (#121486).
-    return _probe_codex_quota_restored(token, base_url=_codex_pool_route_base_url(entry.get("base_url")))
+    return _probe_codex_quota_restored(token, base_url=base_url)
 
 
 def clear_codex_pool_quota_cooldowns(access_token: Optional[str] = None) -> int:
@@ -863,7 +868,7 @@ def clear_codex_pool_quota_cooldowns(access_token: Optional[str] = None) -> int:
     try:
         # Same owner rule as ``persist_pool_entries``: a profile with no Codex rows of its own
         # borrows the global-root pool, so the cooldown must clear where the rows actually live.
-        target = None if _profile_owns_pool_provider("openai-codex") else _borrowed_single_use_pool_root()
+        target = None if _profile_owns_pool_provider("openai-codex") else _borrowed_single_use_pool_root("openai-codex")
         with _auth_store_lock(target_path=target):
             auth_store = _load_auth_store(target)
             for entry in _codex_pool_dicts(_pool_entries(auth_store, "openai-codex")):

@@ -1767,6 +1767,9 @@ DEFAULT_CONFIG = {
     # "tone", "style"}}.
     "personalities": {},
     "auth": {  # Login policy (credentials themselves live in auth.json / .env).
+        # Optional absolute auth.json path: borrow ONLY Codex, preserving local overrides.
+        # Refreshes/cooldowns write back under the shared store lock; no credential copies.
+        "shared_codex_auth_file": None,
         # Borrow and refresh the Codex CLI (~/.codex/auth.json) and Claude Code (~/.claude/.credentials.json)
         # logins automatically when Hermes has no usable login of its own. Their refresh tokens are single-use
         # and rotate, so two programs on one login can log each other out; set false to make Hermes use only
@@ -2219,6 +2222,8 @@ DEFAULT_CONFIG = {
         # huge remote URLs can OOM-kill constrained deployments. Enforced in
         # gateway/platforms/base.py for every adapter. 0 = no cap. Default 128 MiB.
         "max_inbound_media_bytes": 134217728,
+        # Separate Slack document cap; 0 disables it.
+        "max_inbound_document_bytes": 20971520,
         # Let adapters read HTTP_PROXY/HTTPS_PROXY/NO_PROXY/SSL_CERT_FILE from the environment and
         # auto-detect generic/macOS system proxies. False when the gateway inherits a proxy it must
         # not use (e.g. a scheduled task picking up a Clash/V2Ray HTTP_PROXY -> "Cannot connect to
