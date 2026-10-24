@@ -515,6 +515,40 @@ def _global_auth_file_path() -> Optional[Path]:
     return None if _same_path(get_hermes_home(), global_root) else global_root / "auth.json"
 
 
+def _provider_fallback_auth_file_path(provider_id: str) -> Optional[Path]:
+    """Optional Codex-only borrowing for external HERMES_HOME installations.
+
+    Local provider/pool records still win. Never change the general global root:
+    doing so would expose every other provider to this home.
+    """
+    if provider_id == "openai-codex":
+        from hermes_cli.config import load_config_readonly
+        auth_config = (load_config_readonly() or {}).get("auth", {})
+        value = auth_config.get("shared_codex_auth_file") if isinstance(auth_config, dict) else None
+        if value is not None:
+            if not isinstance(value, str) or not Path(value).is_absolute():
+                raise ValueError("auth.shared_codex_auth_file must be an absolute auth.json path")
+            path = Path(value).resolve(strict=False)
+            if path.name != "auth.json":
+                raise ValueError("auth.shared_codex_auth_file must name auth.json")
+            return None if _same_path(path, _auth_file_path()) else path
+    return _global_auth_file_path()
+
+
+def _load_provider_fallback_auth_store(provider_id: str) -> dict[str, Any]:
+    path = _provider_fallback_auth_file_path(provider_id)
+    if path is None:
+        return {}
+    global_path = _global_auth_file_path()
+    if global_path is not None and _same_path(path, global_path):
+        return _load_global_auth_store()
+    # Match the existing test seat belt for both reads and write-through.
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("HOME"):
+        if _same_path(path, Path(os.environ["HOME"]) / ".hermes" / "auth.json"):
+            return {}
+    return _load_auth_store(path)
+
+
 def _load_global_auth_store() -> dict[str, Any]:
     """Load the global-root auth store (read-only fallback, mtime-memoised); ``{}`` when absent or
     unreadable — a malformed global store must never break profile reads."""
@@ -834,8 +868,8 @@ def _load_provider_state_with_source(
     state = _provider_state_in(auth_store, provider_id)
     if state is not None:
         return state, _auth_file_path()
-    global_state = _provider_state_in(_load_global_auth_store(), provider_id)
-    return (global_state, _global_auth_file_path()) if global_state is not None else (None, None)
+    global_state = _provider_state_in(_load_provider_fallback_auth_store(provider_id), provider_id)
+    return (global_state, _provider_fallback_auth_file_path(provider_id)) if global_state is not None else (None, None)
 
 
 def _load_provider_state(auth_store: dict[str, Any], provider_id: str) -> Optional[dict[str, Any]]:
@@ -953,7 +987,13 @@ def read_credential_pool(provider_id: Optional[str] = None) -> dict[str, Any]:
     pool = _load_auth_store().get("credential_pool")
     pool = pool if isinstance(pool, dict) else {}
     global_pool = _load_global_auth_store().get("credential_pool")
-    global_pool = global_pool if isinstance(global_pool, dict) else {}
+    global_pool = dict(global_pool) if isinstance(global_pool, dict) else {}
+    # Only replace the Codex slice; all-provider inventory must not inherit
+    # unrelated credentials from the explicitly configured shared store.
+    codex_pool = _load_provider_fallback_auth_store("openai-codex").get("credential_pool", {})
+    global_pool.pop("openai-codex", None)
+    if isinstance(codex_pool, dict) and "openai-codex" in codex_pool:
+        global_pool["openai-codex"] = codex_pool["openai-codex"]
 
     if provider_id is None:
         merged = dict(pool)

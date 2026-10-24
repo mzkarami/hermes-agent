@@ -426,6 +426,48 @@ class TestSlackDownloadSlackFileBytes:
         result = asyncio.run(run())
         assert result == b"raw bytes here"
 
+    @pytest.mark.parametrize("body,length,encoding,expected", [
+        (b"1234", None, None, b"1234"),
+        (b"123456", None, None, "exceeds limit"),
+        (b"1234", "6", None, "exceeds limit"),
+        (b"1234", None, "gzip", "Content-Encoding"),
+    ])
+    def test_document_stream_bound(self, body, length, encoding, expected):
+        adapter = _make_slack_adapter()
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {"content-type": "application/pdf"}
+        if length:
+            response.headers["content-length"] = length
+        if encoding:
+            response.headers["content-encoding"] = encoding
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        response.content = b"never use buffered response"
+
+        async def chunks():
+            yield body[:3]
+            yield body[3:]
+
+        response.aiter_bytes = chunks
+        client = AsyncMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.build_request = MagicMock(return_value=MagicMock())
+        client.send = AsyncMock(return_value=response)
+
+        async def run():
+            with patch("tools.url_safety.create_ssrf_safe_async_client", return_value=client):
+                return await adapter._download_slack_file_bytes(
+                    "https://files.slack.com/file.pdf", max_bytes=5)
+
+        if isinstance(expected, bytes):
+            assert asyncio.run(run()) == expected
+        else:
+            with pytest.raises(ValueError, match=expected):
+                asyncio.run(run())
+        response.aclose.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # MattermostAdapter._send_url_as_file

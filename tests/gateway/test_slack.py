@@ -1552,6 +1552,115 @@ class TestBangPrefixCommands:
 
 
 class TestIncomingDocumentHandling:
+    @pytest.mark.asyncio
+    async def test_oversized_document_notice_and_command_invariant(self, adapter, monkeypatch, caplog):
+        monkeypatch.setattr(_slack_mod, "get_inbound_document_max_bytes", lambda: 5)
+        attachment = {"mimetype": "application/pdf", "name": "<!channel>.pdf",
+                      "url_private_download": "https://files.slack.com/file.pdf", "size": 6}
+        adapter._download_slack_file_bytes = AsyncMock()
+        await adapter._handle_slack_message(self._make_event(files=[attachment], text="read this"))
+        message = adapter.handle_message.call_args[0][0]
+        assert not message.media_urls
+        assert message.text == "read this"
+        posted = adapter._app.client.chat_postMessage.call_args.kwargs
+        assert posted["channel"] == "D123"
+        assert posted["thread_ts"] == "1234567890.000001"
+        assert "&lt;!channel&gt;" in posted["text"]
+        assert "6 bytes exceeds" in posted["text"]
+        assert "<!channel>.pdf" not in caplog.text
+        adapter._download_slack_file_bytes.assert_not_awaited()
+
+        adapter._app.client.chat_postMessage.reset_mock()
+        adapter.handle_message.reset_mock()
+        command_event = self._make_event(files=[attachment], text="!stop")
+        command_event["ts"] = "1234567890.000002"
+        await adapter._handle_slack_message(command_event)
+        command = adapter.handle_message.call_args[0][0]
+        assert command.text == "/stop"
+        assert command.message_type == MessageType.COMMAND
+        adapter._app.client.chat_postMessage.assert_awaited_once()
+        assert "6 bytes exceeds" in adapter._app.client.chat_postMessage.call_args.kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_understated_document_body_gets_notice(self, adapter, monkeypatch):
+        monkeypatch.setattr(_slack_mod, "get_inbound_document_max_bytes", lambda: 5)
+        attachment = {"mimetype": "application/pdf", "name": "report.pdf",
+                      "url_private_download": "https://files.slack.com/file.pdf", "size": 1}
+        adapter._download_slack_file_bytes = AsyncMock(return_value=b"abcdef")
+        await adapter._handle_slack_message(self._make_event(files=[attachment]))
+        message = adapter.handle_message.call_args[0][0]
+        assert not message.media_urls
+        assert message.text == "hello"
+        assert "report.pdf" in adapter._app.client.chat_postMessage.call_args.kwargs["text"]
+        assert "6 bytes exceeds" in adapter._app.client.chat_postMessage.call_args.kwargs["text"]
+        adapter._download_slack_file_bytes.assert_awaited_once_with(
+            "https://files.slack.com/file.pdf", team_id="", max_bytes=5)
+
+    @pytest.mark.asyncio
+    async def test_routed_profile_cap_and_private_channel_notice(self, adapter, tmp_path, monkeypatch):
+        """Shared bot reads routed config, not ambient home, before download."""
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        from gateway.profile_routing import ProfileRoute
+        from gateway.run import GatewayRunner
+        import gateway.run as gateway_run
+        from types import SimpleNamespace
+
+        homes = {name: tmp_path / name for name in ("default", "company")}
+        for name, limit in (("default", 50), ("company", 5)):
+            homes[name].mkdir()
+            (homes[name] / "config.yaml").write_text(
+                f"gateway:\n  max_inbound_document_bytes: {limit}\n")
+        monkeypatch.setattr(gateway_run, "_multiplex_profile_homes",
+                            lambda config: list(homes.items()))
+        adapter.gateway_runner = SimpleNamespace(
+            config=SimpleNamespace(
+                multiplex_profiles=True,
+                profile_routes=[ProfileRoute(name="company-channel", platform="slack",
+                                             profile="company", chat_id="C123")]),
+            _profile_name_for_source=None,
+            _resolve_profile_home_for_source=lambda source: homes[source.profile],
+        )
+        adapter.gateway_runner._profile_name_for_source = (
+            GatewayRunner._profile_name_for_source.__get__(adapter.gateway_runner))
+        attachment = {"mimetype": "application/pdf", "name": "report.pdf",
+                      "url_private_download": "https://files.slack.com/report.pdf", "size": 6}
+        adapter._download_slack_file_bytes = AsyncMock()
+        token = set_hermes_home_override(homes["default"])
+        try:
+            event = self._make_event(files=[attachment], text="<@U_BOT> !stop",
+                                     channel_type="channel")
+            event["channel"] = "C123"
+            await adapter._handle_slack_message(event)
+            msg = adapter.handle_message.await_args.args[0]
+            assert msg.source.profile == "company"
+            assert msg.text == "/stop" and msg.message_type == MessageType.COMMAND
+            assert not msg.media_urls
+            adapter._download_slack_file_bytes.assert_not_awaited()
+            adapter._app.client.chat_postEphemeral.assert_awaited_once()
+            notice = adapter._app.client.chat_postEphemeral.call_args.kwargs
+            assert notice["channel"] == "C123" and notice["user"] == "U_USER"
+            assert "6 bytes exceeds" in notice["text"]
+            adapter._app.client.chat_postMessage.assert_not_awaited()
+        finally:
+            reset_hermes_home_override(token)
+
+    @pytest.mark.asyncio
+    async def test_mpim_oversize_notice_is_private_to_sender(self, adapter, monkeypatch):
+        """A group DM is not a one-to-one DM: never post its filename publicly."""
+        monkeypatch.setattr(_slack_mod, "get_inbound_document_max_bytes", lambda: 5)
+        adapter._channel_gate_allows = AsyncMock(return_value=True)
+        attachment = {"mimetype": "application/pdf", "name": "private-report.pdf",
+                      "url_private_download": "https://files.slack.com/file.pdf", "size": 6}
+        event = self._make_event(files=[attachment], text="<@U_BOT> read this",
+                                 channel_type="mpim")
+        event["channel"] = "G123"
+        await adapter._handle_slack_message(event)
+        adapter._app.client.chat_postMessage.assert_not_awaited()
+        adapter._app.client.chat_postEphemeral.assert_awaited_once()
+        notice = adapter._app.client.chat_postEphemeral.call_args.kwargs
+        assert notice["channel"] == "G123" and notice["user"] == "U_USER"
+        assert "private-report.pdf" in notice["text"]
+
     def _make_event(
         self, files=None, text="hello", channel_type="im", blocks=None, attachments=None
     ):
