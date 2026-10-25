@@ -4723,7 +4723,12 @@ class SlackAdapter(BasePlatformAdapter):
         await self.handle_message(msg_event)
         if document_notices:
             notice = "[Slack attachment notice]\n" + "\n".join(f"- {n}" for n in document_notices)
-            metadata = msg_event.metadata
+            # Native admission reserves event.metadata for gateway routing. Keep
+            # the installed Slack notice scope local, rather than relying on an
+            # ambiguous channel cache or adding metadata to the inbound event.
+            metadata = {
+                "slack_team_id": team_id, "slack_channel_id": channel_id,
+                "slack_thread_ts": thread_ts}
             if is_one_to_one_dm:
                 # A group DM (mpim) is shared: disclose the filename only to its sender.
                 # Bypass send(): it may consume a pending slash response or finalize a stream.
