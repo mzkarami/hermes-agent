@@ -1553,6 +1553,48 @@ class TestBangPrefixCommands:
 
 class TestIncomingDocumentHandling:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("text", ["<@U_BOT> read this", "<@U_BOT> !stop"])
+    async def test_rejection_notice_uses_explicit_workspace_for_ambiguous_channel(
+            self, adapter, monkeypatch, text):
+        """An ambiguous channel must deliver only to the inbound workspace's sender."""
+        monkeypatch.setattr(_slack_mod, "get_inbound_document_max_bytes", lambda: 5)
+        primary, second = adapter._app.client, AsyncMock()
+        adapter._team_clients = {"T_ONE": primary, "T_TWO": second}
+        adapter._remember_channel_team("C_SHARED", "T_ONE")
+        adapter._remember_channel_team("C_SHARED", "T_TWO")
+        adapter._resolve_user_name = AsyncMock(return_value="Sender")
+        adapter._resolve_channel_name = AsyncMock(return_value="Shared")
+        adapter._humanize_user_mentions = AsyncMock(side_effect=lambda text, **kw: text)
+        adapter._hydrate_thread_context = AsyncMock(return_value=(None, [], []))
+        adapter._download_slack_file_bytes = AsyncMock()
+        attachment = {"mimetype": "application/pdf", "name": "private-report.pdf",
+                      "url_private_download": "https://files.slack.com/file.pdf", "size": 6}
+        event = self._make_event(files=[attachment], text=text, channel_type="channel")
+        event.update(channel="C_SHARED", team="T_TWO")
+        await adapter._handle_slack_message(event)
+
+        adapter.handle_message.assert_awaited_once()
+        second.chat_postEphemeral.assert_awaited_once()
+        notice = second.chat_postEphemeral.await_args.kwargs
+        assert notice["channel"] == "C_SHARED"
+        assert notice["user"] == "U_USER"
+        assert "private-report.pdf" in notice["text"]
+        assert "6 bytes exceeds" in notice["text"]
+        primary.chat_postEphemeral.assert_not_awaited()
+        primary.chat_postMessage.assert_not_awaited()
+        second.chat_postMessage.assert_not_awaited()
+        adapter._download_slack_file_bytes.assert_not_awaited()
+        message = adapter.handle_message.await_args.args[0]
+        assert message.source.scope_id == "T_TWO"
+        # Preserve the evolved native-admission contract, not the old event metadata.
+        assert message.metadata == {}
+        assert message.source.thread_id == event["ts"]
+        assert not message.media_urls
+        if "!stop" in text:
+            assert message.text == "/stop"
+            assert message.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
     async def test_oversized_document_notice_and_command_invariant(self, adapter, monkeypatch, caplog):
         monkeypatch.setattr(_slack_mod, "get_inbound_document_max_bytes", lambda: 5)
         attachment = {"mimetype": "application/pdf", "name": "<!channel>.pdf",
