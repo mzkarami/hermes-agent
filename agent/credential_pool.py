@@ -767,7 +767,7 @@ def _write_through_provider_state_to_global_root(
     See #48415.
     """
     try:
-        global_path = _guarded_global_root(auth_mod._global_auth_file_path())
+        global_path = _guarded_global_root(auth_mod._provider_fallback_auth_file_path(provider_id))
     except Exception:
         return
     if global_path is None:
@@ -804,7 +804,7 @@ def _profile_owns_pool_provider(provider: str) -> bool:
     """
     # Classic mode (profile == root) has no root fallback, so the answer is always "owns";
     # skip the per-call auth.json re-read on this hot load_pool path.
-    if auth_mod._global_auth_file_path() is None:
+    if auth_mod._provider_fallback_auth_file_path(provider) is None:
         return True
     try:
         auth_store = _load_auth_store()
@@ -813,14 +813,14 @@ def _profile_owns_pool_provider(provider: str) -> bool:
     return _store_owns_pool_provider(auth_store, provider)
 
 
-def _borrowed_single_use_pool_root() -> Optional[Path]:
+def _borrowed_single_use_pool_root(provider: str = "") -> Optional[Path]:
     """Global-root auth.json when persisting a BORROWED single-use pool, else None.
 
     ``None`` means "persist to the active store as usual": classic mode
     (profile == root), or the profile owns its own rows for this provider.
     """
     try:
-        return _guarded_global_root(_global_auth_file_path())
+        return _guarded_global_root(auth_mod._provider_fallback_auth_file_path(provider))
     except Exception:
         return None
 
@@ -888,7 +888,7 @@ def persist_pool_entries(
     (under the root lock); everything else goes to the active store.
     """
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
-        global_path = _borrowed_single_use_pool_root()
+        global_path = _borrowed_single_use_pool_root(provider)
         if global_path is not None:
             try:
                 return _update_root_pool_rows(
@@ -1447,7 +1447,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 state, source_path = _load_provider_state_with_source(auth_store, self.provider)
                 if not isinstance(state, dict):
                     return
-                global_root = _global_auth_file_path()
+                global_root = auth_mod._provider_fallback_auth_file_path(self.provider)
                 is_from_root = bool(
                     source_path is not None and global_root is not None and _same_path(source_path, global_root)
                 )
@@ -1507,10 +1507,15 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # the winner's rotated token and skips the POST.
         with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
             if self.provider == "openai-codex":
-                synced = self._sync_entry_from_auth_store(entry)
-                if synced is not entry and not force and not self._entry_needs_refresh(synced):
-                    return synced
-                return self._refresh_entry_impl(synced, force=force)
+                # Serialize borrowers on the owning store as well as their
+                # local lock. Keep local -> shared lock ordering consistent.
+                target = (None if _profile_owns_pool_provider(self.provider)
+                          else _borrowed_single_use_pool_root(self.provider))
+                with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout(), target_path=target):
+                    synced = self._sync_entry_from_auth_store(entry)
+                    if synced is not entry and not force and not self._entry_needs_refresh(synced):
+                        return synced
+                    return self._refresh_entry_impl(synced, force=force)
             synced = self._sync_entry_from_pool_store(entry)
             if self.provider == "anthropic" and synced.source == "claude_code":
                 # claude_code entries are NOT profile-owned: the refresh token

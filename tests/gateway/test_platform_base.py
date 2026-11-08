@@ -44,6 +44,20 @@ class TestInboundMediaSizeCap:
     _PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 64
 
 
+    def test_slack_document_cap_resolves_per_home(self, tmp_path, monkeypatch):
+        import gateway.platforms.base as base
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert base.get_inbound_document_max_bytes() == DEFAULT_CONFIG["gateway"]["max_inbound_document_bytes"]
+        for value, expected in [(50000000, 50000000), (52428800, 52428800),
+                                (0, 0), ("invalid", 20971520)]:
+            home = tmp_path / str(value)
+            home.mkdir()
+            (home / "config.yaml").write_text(f"gateway:\n  max_inbound_document_bytes: {value}\n")
+            monkeypatch.setenv("HERMES_HOME", str(home))
+            assert base.get_inbound_document_max_bytes() == expected
+
+
     def test_image_bytes_rejected_when_oversized(self, monkeypatch):
         from gateway.platforms import base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 16)
